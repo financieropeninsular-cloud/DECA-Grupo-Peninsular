@@ -1,4 +1,5 @@
-import os,json,uuid,threading
+import os,json,uuid,threading,io
+import urllib.request, urllib.parse
 from pathlib import Path
 from datetime import datetime
 from flask import Flask,request,jsonify,send_file,abort,render_template_string
@@ -12,6 +13,9 @@ from pypdf import PdfReader,PdfWriter
 app=Flask(__name__)
 ROOT=Path(__file__).resolve().parent; DATA=ROOT/'data'; PDF=DATA/'pdfs'; DB=DATA/'db.json'; LOCK=threading.Lock()
 BASE=os.getenv('PUBLIC_BASE_URL','').rstrip('/')
+SB_URL=os.getenv('SUPABASE_URL','').rstrip('/')
+SB_KEY=os.getenv('SUPABASE_KEY','')
+SB_SECRET=os.getenv('DECA_STORAGE_SECRET','')
 ISSUERS=[
  {'id':'autogruas','name':'AUTOGRÚAS DEL MEDITERRÁNEO, S.L.','nif':'B87289278','address':'C/ Félix Rodríguez de la Fuente, 42 · 03203 Torrellano-Elche (Alicante)','prefix':'ADM'},
  {'id':'gruas','name':'GRÚAS PENINSULAR, S.L.','nif':'B82726282','address':'Ctra. M-115, km 0,25 · 28830 San Fernando de Henares (Madrid)','prefix':'GP'},
@@ -20,9 +24,28 @@ ISSUERS=[
 
 def now(): return datetime.now().astimezone().isoformat(timespec='seconds')
 def empty(): return {'documents':[],'companies':[],'transporters':[],'vehicles':[],'issuers':ISSUERS,'sequence':{},'settings':{'public_base_url':BASE or 'http://localhost:8080'}}
+def sb_enabled(): return bool(SB_URL and SB_KEY and SB_SECRET)
+def sb_headers(content_type='application/json'):
+ return {'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'x-deca-secret':SB_SECRET,'Content-Type':content_type}
+def sb_request(path,method='GET',body=None,headers=None):
+ h=sb_headers(); h.update(headers or {})
+ data=None if body is None else (body if isinstance(body,(bytes,bytearray)) else json.dumps(body,ensure_ascii=False).encode('utf-8'))
+ req=urllib.request.Request(SB_URL+path,data=data,headers=h,method=method)
+ with urllib.request.urlopen(req,timeout=20) as r:return r.read()
 def load():
  DATA.mkdir(exist_ok=True); PDF.mkdir(exist_ok=True)
- if not DB.exists(): save(empty())
+ if sb_enabled():
+  try:
+   raw=sb_request('/rest/v1/deca_app_state?id=eq.main&select=data')
+   rows=json.loads(raw.decode('utf-8'))
+   d=rows[0]['data'] if rows else empty()
+   for k,v in empty().items(): d.setdefault(k,v)
+   d['issuers']=ISSUERS
+   return d
+  except Exception:
+   pass
+ if not DB.exists():
+  t=DB.with_suffix('.tmp'); t.write_text(json.dumps(empty(),ensure_ascii=False,indent=2),encoding='utf-8'); t.replace(DB)
  try:
   d=json.loads(DB.read_text(encoding='utf-8'))
   for k,v in empty().items(): d.setdefault(k,v)
@@ -31,7 +54,20 @@ def load():
  except: return empty()
 def save(d):
  DATA.mkdir(exist_ok=True); PDF.mkdir(exist_ok=True)
+ d['issuers']=ISSUERS
+ if sb_enabled():
+  sb_request('/rest/v1/deca_app_state?on_conflict=id','POST',[{'id':'main','data':d,'updated_at':now()}],{'Prefer':'resolution=merge-duplicates,return=minimal'})
+  return
  t=DB.with_suffix('.tmp'); t.write_text(json.dumps(d,ensure_ascii=False,indent=2),encoding='utf-8'); t.replace(DB)
+def storage_upload(name,data):
+ if not sb_enabled(): return
+ sb_request('/storage/v1/object/deca-pdfs/'+urllib.parse.quote(name),'POST',data,{'Content-Type':'application/pdf','x-upsert':'true'})
+def storage_download(name):
+ if sb_enabled():
+  return sb_request('/storage/v1/object/authenticated/deca-pdfs/'+urllib.parse.quote(name),'GET')
+ p=PDF/name
+ if not p.exists(): raise FileNotFoundError(name)
+ return p.read_bytes()
 def base(d=None): return BASE or (d or load()).get('settings',{}).get('public_base_url') or 'http://localhost:8080'
 def issuer(d,i): return next((x for x in d['issuers'] if x['id']==i),None)
 def num(d,i):
@@ -82,6 +118,7 @@ def make_pdf(doc,d):
  with open(out,'wb') as f:w.write(f)
  tmp.unlink(missing_ok=True);qr.unlink(missing_ok=True)
  if out.stat().st_size>5*1024*1024:raise ValueError('PDF > 5 MB')
+ storage_upload(out.name,out.read_bytes())
  return out,url
 
 HTML=r'''<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>DECA Grupo Peninsular</title><style>
@@ -112,7 +149,7 @@ reset(false);load();
 @app.get('/')
 def home():return render_template_string(HTML)
 @app.get('/health')
-def health():return jsonify(ok=True,time=now())
+def health():return jsonify(ok=True,time=now(),persistent_backend='supabase' if sb_enabled() else 'local')
 @app.get('/api/state')
 def state():return jsonify(load())
 @app.post('/api/settings')
@@ -138,20 +175,20 @@ def reissue(docid):
   if not old:abort(404)
   old['status']='SUSTITUIDO';ts=now();v=int(old.get('version',1))+1;bn=old['number'].split('-V')[0];doc={'id':uuid.uuid4().hex,'number':f'{bn}-V{v}','token':uuid.uuid4().hex,'status':'EMITIDO','version':v,'previous_id':old['id'],'previous_number':old['number'],'created_at':ts,'modified_at':ts,**p};f,u=make_pdf(doc,d);doc['pdf_file']=f.name;doc['url']=u;d['documents'].append(doc);save(d)
  return jsonify(ok=True,document=doc)
+def send_doc(doc):
+ try: data=storage_download(doc['pdf_file'])
+ except Exception: abort(404)
+ return send_file(io.BytesIO(data),mimetype='application/pdf',as_attachment=True,download_name='DECA_'+doc['number'].replace('/','-')+'.pdf')
 @app.get('/d/<token>.pdf')
 def direct(token):
  d=load();doc=next((x for x in d['documents'] if x.get('token')==token),None)
  if not doc:abort(404)
- p=PDF/doc['pdf_file'];
- if not p.exists():abort(404)
- return send_file(p,mimetype='application/pdf',as_attachment=True,download_name='DECA_'+doc['number'].replace('/','-')+'.pdf')
+ return send_doc(doc)
 @app.get('/api/deca/<docid>/pdf')
 def pdf(docid):
  d=load();doc=next((x for x in d['documents'] if x['id']==docid),None)
  if not doc:abort(404)
- p=PDF/doc['pdf_file'];
- if not p.exists():abort(404)
- return send_file(p,mimetype='application/pdf',as_attachment=True,download_name='DECA_'+doc['number'].replace('/','-')+'.pdf')
+ return send_doc(doc)
 
 if __name__=='__main__':
  DATA.mkdir(exist_ok=True);PDF.mkdir(exist_ok=True);app.run(host='0.0.0.0',port=int(os.getenv('PORT','8080')))

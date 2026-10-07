@@ -92,6 +92,52 @@ def wrap(c,text,x,y,w,size=8.5,lead=10):
  if line:c.drawString(x,y,line);y-=lead
  return y
 
+
+def make_cmr_pdf(doc,d):
+ token=doc['token']; out=PDF/f'{token}-cmr.pdf'; x=issuer(d,doc['issuer_id'])
+ c=canvas.Canvas(str(out),pagesize=A4);W,H=A4;m=12*mm
+ def box(label,value,x0,y0,w,h,label_size=6.5,value_size=8):
+  c.rect(x0,y0-h,w,h)
+  c.setFont('Helvetica-Bold',label_size);c.drawString(x0+3,y0-9,label)
+  wrap(c,value,x0+3,y0-19,w-6,value_size,9)
+ for idx,sh in enumerate(doc.get('shipments') or [{}],1):
+  if idx>1:c.showPage()
+  y=H-m
+  c.setFont('Helvetica-Bold',15);c.drawString(m,y,'CARTA DE PORTE / CMR')
+  c.setFont('Helvetica',7.5);c.drawRightString(W-m,y,f"DeCA: {doc['number']} · Envío {idx}")
+  y-=8*mm
+  left=(W-2*m)*0.55; right=(W-2*m)-left
+  box('1. Remitente / Sender',f"{doc.get('shipper_name','')}\nNIF {doc.get('shipper_nif','')}\n{doc.get('shipper_address','')}",m,y,left,29*mm)
+  box('2. Destinatario / Consignee',f"{sh.get('consignee_name','')}\n{sh.get('consignee_address','')}",m+left,y,right,29*mm)
+  y-=29*mm
+  box('3. Lugar de entrega / Place of delivery',sh.get('destination',''),m,y,left,18*mm)
+  box('4. Lugar y fecha de carga / Place and date of taking over',f"{sh.get('origin','')} · {doc.get('transport_date','')}",m+left,y,right,18*mm)
+  y-=18*mm
+  box('5. Transportista / Carrier',f"{doc.get('carrier_name','')}\nNIF {doc.get('carrier_nif','')}",m,y,left,24*mm)
+  box('6. Vehículo / Vehicle',f"Tractor/Rígido: {doc.get('vehicle_plate','')}\nRemolque: {doc.get('trailer_plate','') or '—'}",m+left,y,right,24*mm)
+  y-=24*mm
+  box('7. Marcas y números / Marks & Nos.',sh.get('marks',''),m,y,(W-2*m)*0.22,25*mm)
+  box('8. Nº bultos / Packages',sh.get('packages',''),m+(W-2*m)*0.22,y,(W-2*m)*0.13,25*mm)
+  box('9. Embalaje / Packing',sh.get('packing',''),m+(W-2*m)*0.35,y,(W-2*m)*0.15,25*mm)
+  box('10. Naturaleza de la mercancía / Nature of goods',sh.get('goods',''),m+(W-2*m)*0.50,y,(W-2*m)*0.50,25*mm)
+  y-=25*mm
+  box('11. Peso bruto / Gross weight',sh.get('weight') or sh.get('other_measure',''),m,y,(W-2*m)*0.32,18*mm)
+  box('12. Referencias / References',sh.get('references',''),m+(W-2*m)*0.32,y,(W-2*m)*0.68,18*mm)
+  y-=18*mm
+  box('13. Instrucciones del remitente / Sender instructions',doc.get('observations',''),m,y,W-2*m,28*mm)
+  y-=28*mm
+  box('14. Autorización especial / Special authorization',doc.get('special_authorization',''),m,y,W-2*m,16*mm)
+  y-=16*mm
+  sigw=(W-2*m)/3
+  box('15. Firma remitente / Sender signature','',m,y,sigw,30*mm)
+  box('16. Firma transportista / Carrier signature','',m+sigw,y,sigw,30*mm)
+  box('17. Firma destinatario / Consignee signature','',m+2*sigw,y,sigw,30*mm)
+  c.setFont('Helvetica',6.5);c.drawString(m,8*mm,f"Generado automáticamente a partir del DeCA {doc['number']} · {doc.get('created_at','')}")
+ c.save()
+ if out.stat().st_size>5*1024*1024:raise ValueError('CMR PDF > 5 MB')
+ storage_upload(out.name,out.read_bytes())
+ return out
+
 def make_pdf(doc,d):
  token=doc['token']; tmp=PDF/f'{token}.tmp.pdf'; out=PDF/f'{token}.pdf'; qr=PDF/f'{token}.png'; url=f"{base(d)}/d/{token}.pdf"; x=issuer(d,doc['issuer_id'])
  q=qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M,box_size=6,border=2);q.add_data(url);q.make(fit=True);q.make_image().save(qr)
@@ -136,11 +182,11 @@ function tab(id,b){['new','hist','cfg'].forEach(x=>$(x).classList.add('hide'));$
 async function load(){S=await fetch('/api/state').then(r=>r.json());$('public_url').value=S.settings.public_base_url||'';renderIssuers();history()}
 function renderIssuers(){$('issuers').innerHTML=S.issuers.map(x=>`<button class="${x.id===issuerId?'on':''}" onclick="issuerId='${x.id}';renderIssuers()"><b>${esc(x.name)}</b><br><small>NIF ${esc(x.nif)}</small></button>`).join('')}
 function I(){return S.issuers.find(x=>x.id===issuerId)}function asCarrier(){let x=I();if(!x)return alert('Seleccione empresa');$('carrier_name').value=x.name;$('carrier_nif').value=x.nif}function asShipper(){let x=I();if(!x)return alert('Seleccione empresa');$('shipper_name').value=x.name;$('shipper_nif').value=x.nif;$('shipper_address').value=x.address}
-function addShip(v={}){let d=document.createElement('div');d.className='ship';d.innerHTML=`<div class="row"><div><label>Origen</label><input class="origin" value="${esc(v.origin||'')}"></div><div><label>Destino</label><input class="destination" value="${esc(v.destination||'')}"></div></div><label>Mercancía</label><input class="goods" value="${esc(v.goods||'')}"><div class="row"><div><label>Peso</label><input class="weight" value="${esc(v.weight||'')}"></div><div><label>Magnitud alternativa</label><input class="other_measure" value="${esc(v.other_measure||'')}"></div></div><button class="btn danger" onclick="this.parentElement.remove()">Eliminar</button>`;$('ships').appendChild(d)}
-function payload(){return {issuer_id:issuerId,shipper_name:$('shipper_name').value,shipper_nif:$('shipper_nif').value,shipper_address:$('shipper_address').value,carrier_name:$('carrier_name').value,carrier_nif:$('carrier_nif').value,transport_date:$('transport_date').value,vehicle_plate:$('vehicle_plate').value,trailer_plate:$('trailer_plate').value,special_authorization:$('special_authorization').value,observations:$('observations').value,change_reason:$('change_reason').value,shipments:[...document.querySelectorAll('.ship')].map(x=>({origin:x.querySelector('.origin').value,destination:x.querySelector('.destination').value,goods:x.querySelector('.goods').value,weight:x.querySelector('.weight').value,other_measure:x.querySelector('.other_measure').value}))}}
-async function issue(){let r=await fetch(editing?'/api/deca/'+editing+'/reissue':'/api/deca',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload())});let j=await r.json();if(!r.ok){$('msg').className='warn';$('msg').textContent='Revisar: '+(j.errors||[j.error]).join(' · ');return}$('msg').className='ok';$('msg').innerHTML=`Emitido <b>${esc(j.document.number)}</b> · <a href="/api/deca/${j.document.id}/pdf">Descargar PDF</a>`;await load();reset(false)}
+function addShip(v={}){let d=document.createElement('div');d.className='ship';d.innerHTML=`<div class="row"><div><label>Origen / lugar de carga</label><input class="origin" value="${esc(v.origin||'')}"></div><div><label>Destino / lugar de entrega</label><input class="destination" value="${esc(v.destination||'')}"></div></div><div class="row"><div><label>Destinatario</label><input class="consignee_name" value="${esc(v.consignee_name||'')}"></div><div><label>Domicilio destinatario</label><input class="consignee_address" value="${esc(v.consignee_address||'')}"></div></div><label>Mercancía</label><input class="goods" value="${esc(v.goods||'')}"><div class="row"><div><label>Peso</label><input class="weight" value="${esc(v.weight||'')}"></div><div><label>Magnitud alternativa</label><input class="other_measure" value="${esc(v.other_measure||'')}"></div></div><div class="row"><div><label>Nº bultos</label><input class="packages" value="${esc(v.packages||'')}"></div><div><label>Tipo de embalaje</label><input class="packing" value="${esc(v.packing||'')}"></div></div><div class="row"><div><label>Marcas / números</label><input class="marks" value="${esc(v.marks||'')}"></div><div><label>Referencias</label><input class="references" value="${esc(v.references||'')}"></div></div><button class="btn danger" onclick="this.parentElement.remove()">Eliminar</button>`;$('ships').appendChild(d)}
+function payload(){return {issuer_id:issuerId,shipper_name:$('shipper_name').value,shipper_nif:$('shipper_nif').value,shipper_address:$('shipper_address').value,carrier_name:$('carrier_name').value,carrier_nif:$('carrier_nif').value,transport_date:$('transport_date').value,vehicle_plate:$('vehicle_plate').value,trailer_plate:$('trailer_plate').value,special_authorization:$('special_authorization').value,observations:$('observations').value,change_reason:$('change_reason').value,shipments:[...document.querySelectorAll('.ship')].map(x=>({origin:x.querySelector('.origin').value,destination:x.querySelector('.destination').value,consignee_name:x.querySelector('.consignee_name').value,consignee_address:x.querySelector('.consignee_address').value,goods:x.querySelector('.goods').value,weight:x.querySelector('.weight').value,other_measure:x.querySelector('.other_measure').value,packages:x.querySelector('.packages').value,packing:x.querySelector('.packing').value,marks:x.querySelector('.marks').value,references:x.querySelector('.references').value}))}}
+async function issue(){let r=await fetch(editing?'/api/deca/'+editing+'/reissue':'/api/deca',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload())});let j=await r.json();if(!r.ok){$('msg').className='warn';$('msg').textContent='Revisar: '+(j.errors||[j.error]).join(' · ');return}$('msg').className='ok';$('msg').innerHTML=`Emitido <b>${esc(j.document.number)}</b> · <a href="/api/deca/${j.document.id}/pdf">DeCA PDF</a> · <a href="/api/deca/${j.document.id}/cmr">CMR / Carta de porte</a>`;await load();reset(false)}
 function reset(msg=true){editing=null;issuerId='';renderIssuers();['shipper_name','shipper_nif','shipper_address','carrier_name','carrier_nif','vehicle_plate','trailer_plate','special_authorization','observations','change_reason'].forEach(k=>$(k).value='');$('transport_date').value=new Date().toISOString().slice(0,10);$('ships').innerHTML='';addShip();$('changebox').classList.add('hide');$('emit').textContent='Emitir DeCA + PDF + QR';if(msg){$('msg').className='warn';$('msg').textContent='Seleccione empresa y complete los datos.'}}
-function history(){if(!S.documents)return;let q=($('q')?.value||'').toLowerCase();let a=S.documents.slice().reverse().filter(d=>JSON.stringify(d).toLowerCase().includes(q));$('docs').innerHTML=a.map(d=>`<tr><td><b>${esc(d.number)}</b></td><td>${esc((S.issuers.find(x=>x.id===d.issuer_id)||{}).name)}</td><td>${esc(d.transport_date)}</td><td>${esc(d.shipper_name)}</td><td>${esc(d.carrier_name)}</td><td>${esc(d.vehicle_plate)}</td><td>${esc(d.status)}</td><td><a href="/api/deca/${d.id}/pdf">PDF</a>${d.status==='EMITIDO'?` · <a href="#" onclick="edit('${d.id}');return false">Modificar</a>`:''}</td></tr>`).join('')}
+function history(){if(!S.documents)return;let q=($('q')?.value||'').toLowerCase();let a=S.documents.slice().reverse().filter(d=>JSON.stringify(d).toLowerCase().includes(q));$('docs').innerHTML=a.map(d=>`<tr><td><b>${esc(d.number)}</b></td><td>${esc((S.issuers.find(x=>x.id===d.issuer_id)||{}).name)}</td><td>${esc(d.transport_date)}</td><td>${esc(d.shipper_name)}</td><td>${esc(d.carrier_name)}</td><td>${esc(d.vehicle_plate)}</td><td>${esc(d.status)}</td><td><a href="/api/deca/${d.id}/pdf">DeCA</a> · <a href="/api/deca/${d.id}/cmr">CMR</a>${d.status==='EMITIDO'?` · <a href="#" onclick="edit('${d.id}');return false">Modificar</a>`:''}</td></tr>`).join('')}
 function edit(id){let d=S.documents.find(x=>x.id===id);editing=id;issuerId=d.issuer_id;renderIssuers();['shipper_name','shipper_nif','shipper_address','carrier_name','carrier_nif','transport_date','vehicle_plate','trailer_plate','special_authorization','observations'].forEach(k=>$(k).value=d[k]||'');$('ships').innerHTML='';d.shipments.forEach(addShip);$('changebox').classList.remove('hide');$('emit').textContent='Emitir nueva versión';document.querySelector('.tabs button').click()}
 async function saveCfg(){let r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({public_base_url:$('public_url').value})});let j=await r.json();$('cfgmsg').textContent=r.ok?'Guardado: '+j.public_base_url:j.error;await load()}
 reset(false);load();
@@ -163,7 +209,7 @@ def issue():
  p=request.get_json(force=True);e=valid(p)
  if e:return jsonify(errors=e),400
  with LOCK:
-  d=load();ts=now();doc={'id':uuid.uuid4().hex,'number':num(d,p['issuer_id']),'token':uuid.uuid4().hex,'status':'EMITIDO','version':1,'created_at':ts,'modified_at':ts,**p};f,u=make_pdf(doc,d);doc['pdf_file']=f.name;doc['url']=u;d['documents'].append(doc);save(d)
+  d=load();ts=now();doc={'id':uuid.uuid4().hex,'number':num(d,p['issuer_id']),'token':uuid.uuid4().hex,'status':'EMITIDO','version':1,'created_at':ts,'modified_at':ts,**p};f,u=make_pdf(doc,d);cmr=make_cmr_pdf(doc,d);doc['pdf_file']=f.name;doc['cmr_file']=cmr.name;doc['url']=u;d['documents'].append(doc);save(d)
  return jsonify(ok=True,document=doc)
 @app.post('/api/deca/<docid>/reissue')
 def reissue(docid):
@@ -173,7 +219,7 @@ def reissue(docid):
  with LOCK:
   d=load();old=next((x for x in d['documents'] if x['id']==docid),None)
   if not old:abort(404)
-  old['status']='SUSTITUIDO';ts=now();v=int(old.get('version',1))+1;bn=old['number'].split('-V')[0];doc={'id':uuid.uuid4().hex,'number':f'{bn}-V{v}','token':uuid.uuid4().hex,'status':'EMITIDO','version':v,'previous_id':old['id'],'previous_number':old['number'],'created_at':ts,'modified_at':ts,**p};f,u=make_pdf(doc,d);doc['pdf_file']=f.name;doc['url']=u;d['documents'].append(doc);save(d)
+  old['status']='SUSTITUIDO';ts=now();v=int(old.get('version',1))+1;bn=old['number'].split('-V')[0];doc={'id':uuid.uuid4().hex,'number':f'{bn}-V{v}','token':uuid.uuid4().hex,'status':'EMITIDO','version':v,'previous_id':old['id'],'previous_number':old['number'],'created_at':ts,'modified_at':ts,**p};f,u=make_pdf(doc,d);cmr=make_cmr_pdf(doc,d);doc['pdf_file']=f.name;doc['cmr_file']=cmr.name;doc['url']=u;d['documents'].append(doc);save(d)
  return jsonify(ok=True,document=doc)
 def send_doc(doc):
  try: data=storage_download(doc['pdf_file'])
@@ -189,6 +235,19 @@ def pdf(docid):
  d=load();doc=next((x for x in d['documents'] if x['id']==docid),None)
  if not doc:abort(404)
  return send_doc(doc)
+
+@app.get('/api/deca/<docid>/cmr')
+def cmr(docid):
+ d=load();doc=next((x for x in d['documents'] if x['id']==docid),None)
+ if not doc:abort(404)
+ name=doc.get('cmr_file')
+ if not name:
+  try:
+   p=make_cmr_pdf(doc,d);name=p.name;doc['cmr_file']=name;save(d)
+  except Exception: abort(500)
+ try:data=storage_download(name)
+ except Exception: abort(404)
+ return send_file(io.BytesIO(data),mimetype='application/pdf',as_attachment=True,download_name='CMR_'+doc['number'].replace('/','-')+'.pdf')
 
 if __name__=='__main__':
  DATA.mkdir(exist_ok=True);PDF.mkdir(exist_ok=True);app.run(host='0.0.0.0',port=int(os.getenv('PORT','8080')))
